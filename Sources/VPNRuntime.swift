@@ -12,7 +12,7 @@ struct ProcessResult {
 /// Errors that VPNRuntime can surface.
 enum VPNError: LocalizedError {
     case runtimeNotFound
-    case tapNotFound
+    case tapUnavailable(TAPStatus)
     case serviceNotRunning
     case notConfigured
     case commandFailed(String)
@@ -22,8 +22,8 @@ enum VPNError: LocalizedError {
         switch self {
         case .runtimeNotFound:
             return "Bundled runtime files not found. The app may be incomplete."
-        case .tapNotFound:
-            return "TAP device /dev/tap0 not found.\nPlease install a tun/tap driver for macOS."
+        case .tapUnavailable(let status):
+            return status.userMessage
         case .serviceNotRunning:
             return "VPN service is not running. Start the service first."
         case .notConfigured:
@@ -32,6 +32,61 @@ enum VPNError: LocalizedError {
             return msg
         case .timeout:
             return "Command timed out."
+        }
+    }
+}
+
+/// macOS TAP diagnosis used before SoftEther account creation.
+struct TAPStatus {
+    enum State {
+        case ready
+        case installedButNotLoaded
+        case missing
+    }
+
+    let state: State
+    let devicePath: String?
+    let installedKextPaths: [String]
+    let loadedKexts: [String]
+
+    var isReady: Bool { state == .ready }
+
+    var nicName: String {
+        guard let devicePath else { return "tap0" }
+        return URL(fileURLWithPath: devicePath).lastPathComponent
+    }
+
+    var shortDetail: String {
+        switch state {
+        case .ready:
+            return nicName
+        case .installedButNotLoaded:
+            return "TAP installed but not loaded"
+        case .missing:
+            return "no tap0"
+        }
+    }
+
+    var userMessage: String {
+        switch state {
+        case .ready:
+            return "TAP device \(devicePath ?? "/dev/tap0") is ready."
+        case .installedButNotLoaded:
+            let paths = installedKextPaths.joined(separator: "\n")
+            return """
+            TAP device /dev/tap0 was not found, but a TAP kernel extension is installed and not loaded.
+
+            Installed TAP kext:
+            \(paths)
+
+            Open System Settings > Privacy & Security and allow the blocked system software, then reboot. On Apple Silicon, kernel extensions may also require Reduced Security with user-approved kernel extension loading enabled.
+            """
+        case .missing:
+            return """
+            TAP device /dev/tap0 was not found.
+
+            Install or enable a macOS TAP driver that creates /dev/tap0. Existing utun interfaces are not TAP devices and cannot be used by this SoftEther client mode.
+            """
         }
     }
 }
@@ -163,8 +218,70 @@ final class VPNRuntime {
     // MARK: - TAP / NIC
 
     func checkTAP() -> Bool {
+        tapStatus().isReady
+    }
+
+    func tapStatus() -> TAPStatus {
+        if hasCharacterDevice("/dev/tap0") {
+            return TAPStatus(state: .ready, devicePath: "/dev/tap0", installedKextPaths: installedTAPKextPaths(), loadedKexts: loadedTAPKexts())
+        }
+
+        let installed = installedTAPKextPaths()
+        let loaded = loadedTAPKexts()
+        if !loaded.isEmpty, hasAnyTapDevice() {
+            return TAPStatus(state: .ready, devicePath: firstTapDevice(), installedKextPaths: installed, loadedKexts: loaded)
+        }
+
+        if !installed.isEmpty {
+            return TAPStatus(state: .installedButNotLoaded, devicePath: nil, installedKextPaths: installed, loadedKexts: loaded)
+        }
+
+        return TAPStatus(state: .missing, devicePath: nil, installedKextPaths: [], loadedKexts: loaded)
+    }
+
+    private func hasCharacterDevice(_ path: String) -> Bool {
         var statInfo = stat()
-        return stat("/dev/tap0", &statInfo) == 0 && (statInfo.st_mode & S_IFCHR) != 0
+        return stat(path, &statInfo) == 0 && (statInfo.st_mode & S_IFCHR) != 0
+    }
+
+    private func hasAnyTapDevice() -> Bool {
+        firstTapDevice() != nil
+    }
+
+    private func firstTapDevice() -> String? {
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/dev") else {
+            return nil
+        }
+
+        return entries
+            .filter { $0.range(of: #"^tap[0-9]+$"#, options: .regularExpression) != nil }
+            .sorted()
+            .map { "/dev/\($0)" }
+            .first(where: hasCharacterDevice)
+    }
+
+    private func installedTAPKextPaths() -> [String] {
+        [
+            "/Library/Extensions/tunnelblick-tap.kext",
+            "/Library/Extensions/tap.kext",
+            "/Library/Extensions/tun.kext",
+            "/Library/Extensions/tuntap.kext",
+        ].filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    private func loadedTAPKexts() -> [String] {
+        let result = run(executable: URL(fileURLWithPath: "/usr/sbin/kmutil"), arguments: ["showloaded"], timeout: 5)
+        let output = result.output.isEmpty ? run(executable: URL(fileURLWithPath: "/usr/sbin/kextstat"), arguments: [], timeout: 5).output : result.output
+        return output
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { line in
+                let lower = line.lowercased()
+                return lower.contains("tunnelblick.tap")
+                    || lower.contains("net.sf.tuntaposx.tap")
+                    || lower.contains("foo.tun")
+                    || lower.contains(".tap")
+            }
     }
 
     // MARK: - Connection
@@ -189,8 +306,9 @@ final class VPNRuntime {
         }
 
         // 2. TAP must be present
-        if !checkTAP() {
-            throw VPNError.tapNotFound
+        let tap = tapStatus()
+        if !tap.isReady {
+            throw VPNError.tapUnavailable(tap)
         }
 
         let acct = accountName()
@@ -205,7 +323,7 @@ final class VPNRuntime {
             "/SERVER:\(server)",
             "/HUB:\(hub)",
             "/USERNAME:\(username)",
-            "/NICNAME:tap0",
+            "/NICNAME:\(tap.nicName)",
             stdin: "VPN\n",
             timeout: 15
         )

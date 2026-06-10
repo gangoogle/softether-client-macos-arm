@@ -97,11 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // --- Check TAP on launch ---
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }
-            if !self.runtime.checkTAP() {
-                self.appendLog("⚠ /dev/tap0 not found. Install a tun/tap driver.")
+            let tap = self.runtime.tapStatus()
+            if !tap.isReady {
+                self.appendLog("⚠ " + tap.userMessage.replacingOccurrences(of: "\n", with: " "))
                 self.statusBar.state = .error
                 self.panelContent.setServiceRunning(false)
-                self.panelContent.setVPNConnected(false, detail: "(no tap0)")
+                self.panelContent.setVPNConnected(false, detail: "(\(tap.shortDetail))")
             }
         }
     }
