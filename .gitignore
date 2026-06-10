@@ -1,0 +1,33 @@
+.env
+.env.local
+.DS_Store
+.build/
+SoftEtherVPN.app/
+__pycache__/
+*.pyc
+
+# Runtime state
+bin/vpn_client.config
+bin/backup.vpn_client.config/
+bin/client_log/
+bin/.Global*
+bin/.pid_*
+bin/.ctl_*
+
+# Legacy source/build cache not needed for the native app repo
+build_src/
+code/
+/hamcore.se2
+lib/
+
+# Legacy browser/Python/shell UI
+vpn_backend.py
+vpn_web.py
+vpn_connect.sh
+start_vpn.sh
+start_web.sh
+index.html
+vpn_gui.html
+vpn_dashboard.html
+build_mac.sh
+Makefile

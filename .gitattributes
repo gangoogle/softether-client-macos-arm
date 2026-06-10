@@ -1,0 +1,5 @@
+bin/vpnclient binary
+bin/vpncmd binary
+bin/*.dylib binary
+bin/*.se2 binary
+bin/lang.config binary
